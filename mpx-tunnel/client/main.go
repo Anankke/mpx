@@ -21,6 +21,7 @@ var (
 	coNum       = flag.Int("p", 2, "")
 	serverAddr  = flag.String("l", "0.0.0.0:5513", "")
 	enablePprof = flag.Bool("pprof", false, "")
+	verbose     = flag.Bool("v", false, "verbose")
 )
 
 type mpxConnecter struct {
@@ -53,7 +54,7 @@ func main() {
 		}
 	}
 	d := dialer.NewTCPmultiDialer(remoteAddrs)
-	mpx.Verbose(true)
+	mpx.Verbose(*verbose)
 	cp := mpx.NewConnPool()
 	cp.StartWithDialer(d, *coNum)
 	connecter := &mpxConnecter{ConnPool: cp}
