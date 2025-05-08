@@ -3,6 +3,7 @@ package dialer
 import (
 	"container/list"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -66,12 +67,16 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 	eligible := make([]ServerWithWeight, 0, len(d.RemoteAddrs))
 	for _, ra := range d.RemoteAddrs {
 		if count := d.failCount[ra.Addr]; count >= d.maxFails {
-			if t, ok := d.failedAt[ra.Addr]; ok && now.Sub(t) < d.failTimeout {
-				continue // still in failure state
+			if t, ok := d.failedAt[ra.Addr]; ok {
+				elapsed := now.Sub(t)
+				if elapsed < d.failTimeout {
+					continue // still in failure state
+				}
+				// reset after timeout
+				log.Printf("Dialer: server %s recovered after %s, resetting failure state", ra.Addr, elapsed)
+				d.failCount[ra.Addr] = 0
+				delete(d.failedAt, ra.Addr)
 			}
-			// reset after timeout
-			d.failCount[ra.Addr] = 0
-			delete(d.failedAt, ra.Addr)
 		}
 		eligible = append(eligible, ra)
 	}
