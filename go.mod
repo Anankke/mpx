@@ -1,4 +1,4 @@
-module github.com/fregie/mpx
+module github.com/Anankke/mpx
 
 go 1.18
 

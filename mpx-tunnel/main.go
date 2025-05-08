@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fregie/mpx"
-	"github.com/fregie/mpx/dialer"
+	"github.com/Anankke/mpx"
+	"github.com/Anankke/mpx/dialer"
 )
 
 var (

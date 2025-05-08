@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/fregie/mpx"
+	"github.com/Anankke/mpx"
 )
 
 var (
