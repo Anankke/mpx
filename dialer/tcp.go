@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 )
 
 type TCPDialer struct {
@@ -25,6 +26,10 @@ type TCPmultiDialer struct {
 	RemoteAddrs []ServerWithWeight
 	dialLock    sync.Mutex
 	connList    *list.List
+	failCount   map[string]int
+	failedAt    map[string]time.Time
+	maxFails    int
+	failTimeout time.Duration
 }
 
 type TCPmultiConn struct {
@@ -39,10 +44,14 @@ func (c *TCPmultiConn) Close() error {
 	return c.Conn.Close()
 }
 
-func NewTCPmultiDialer(remoteAddrs []ServerWithWeight) *TCPmultiDialer {
+func NewTCPmultiDialer(remoteAddrs []ServerWithWeight, maxFails int, failTimeout time.Duration) *TCPmultiDialer {
 	return &TCPmultiDialer{
 		RemoteAddrs: remoteAddrs,
 		connList:    list.New(),
+		failCount:   make(map[string]int, len(remoteAddrs)),
+		failedAt:    make(map[string]time.Time),
+		maxFails:    maxFails,
+		failTimeout: failTimeout,
 	}
 }
 
@@ -52,33 +61,53 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 	}
 	d.dialLock.Lock()
 	defer d.dialLock.Unlock()
-	weightMap := make(map[string]uint32)
-	var totalWeight, totalActualWeight uint32
+
+	now := time.Now()
+	eligible := make([]ServerWithWeight, 0, len(d.RemoteAddrs))
 	for _, ra := range d.RemoteAddrs {
+		if count := d.failCount[ra.Addr]; count >= d.maxFails {
+			if t, ok := d.failedAt[ra.Addr]; ok && now.Sub(t) < d.failTimeout {
+				continue // still in failure state
+			}
+			// reset after timeout
+			d.failCount[ra.Addr] = 0
+			delete(d.failedAt, ra.Addr)
+		}
+		eligible = append(eligible, ra)
+	}
+	if len(eligible) == 0 {
+		return nil, 0, fmt.Errorf("no available remote addresses: all in failure state")
+	}
+
+	weightMap := make(map[string]uint32, len(eligible))
+	var totalWeight, totalActualWeight uint32
+	for _, ra := range eligible {
 		weightMap[ra.Addr] = 0
 		totalWeight += ra.Weight
 	}
 	toDelete := make([]*list.Element, 0)
-	for conn := d.connList.Front(); conn != nil; conn = conn.Next() {
-		c := conn.Value.(*TCPmultiConn)
+	for e := d.connList.Front(); e != nil; e = e.Next() {
+		c := e.Value.(*TCPmultiConn)
 		if c.isClosed {
-			toDelete = append(toDelete, conn)
+			toDelete = append(toDelete, e)
 			continue
 		}
-		weightMap[c.remoteAddr] += c.weight
-		totalActualWeight += c.weight
+		if _, ok := weightMap[c.remoteAddr]; ok {
+			weightMap[c.remoteAddr] += c.weight
+			totalActualWeight += c.weight
+		}
 	}
-	for _, conn := range toDelete {
-		d.connList.Remove(conn)
+	for _, e := range toDelete {
+		d.connList.Remove(e)
 	}
 
 	var addr string
 	var weight uint32
 	if d.connList.Len() == 0 {
-		addr = d.RemoteAddrs[0].Addr
-		weight = d.RemoteAddrs[0].Weight
+		addr = eligible[0].Addr
+		weight = eligible[0].Weight
 	} else {
-		for _, ra := range d.RemoteAddrs {
+		for _, ra := range eligible {
 			if float32(weightMap[ra.Addr])/float32(totalActualWeight) <= float32(ra.Weight)/float32(totalWeight) {
 				addr = ra.Addr
 				weight = ra.Weight
@@ -92,8 +121,14 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 	}
 	conn, err := net.DialTCP("tcp", nil, tcpAddr)
 	if err != nil {
+		d.failCount[addr]++
+		if d.failCount[addr] >= d.maxFails {
+			d.failedAt[addr] = now
+		}
 		return nil, 0, err
 	}
+	d.failCount[addr] = 0
+	delete(d.failedAt, addr)
 	conn.SetKeepAlive(true)
 	conn.SetNoDelay(true)
 	mc := &TCPmultiConn{
@@ -102,6 +137,5 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 		remoteAddr: addr,
 	}
 	d.connList.PushBack(mc)
-
-	return mc, weight, err
+	return mc, weight, nil
 }

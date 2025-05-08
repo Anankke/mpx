@@ -8,6 +8,7 @@ import (
 	_ "net/http/pprof"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Anankke/mpx"
 	"github.com/Anankke/mpx/dialer"
@@ -21,6 +22,8 @@ var (
 	coNum       = flag.Int("p", 2, "")
 	enablePprof = flag.Bool("pprof", false, "")
 	verbose     = flag.Bool("v", false, "verbose")
+	maxFails    = flag.Int("max-fails", 2, "max consecutive dial failures before marking server failed")
+	failTimeout = flag.Duration("fail-timeout", 30*time.Second, "duration to skip failed server before retrying")
 )
 
 // isBenignRelayError returns true for expected errors when connections are closed.
@@ -65,7 +68,7 @@ func runClient(localAddr, remoteAddr string, concurrentNum int) {
 			})
 		}
 	}
-	d := dialer.NewTCPmultiDialer(remoteAddrs)
+	d := dialer.NewTCPmultiDialer(remoteAddrs, *maxFails, *failTimeout)
 	cp := mpx.NewConnPool()
 	cp.StartWithDialer(d, concurrentNum)
 	lis, err := net.Listen("tcp", localAddr)
