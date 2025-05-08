@@ -23,6 +23,12 @@ var (
 	verbose     = flag.Bool("v", false, "verbose")
 )
 
+// isBenignRelayError returns true for expected errors when connections are closed.
+func isBenignRelayError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, "connection reset by peer")
+}
+
 func main() {
 	flag.Parse()
 	if *enablePprof {
@@ -80,7 +86,7 @@ func runClient(localAddr, remoteAddr string, concurrentNum int) {
 				log.Printf("failed to connect to target: %v", err)
 			}
 			_, _, err = relay.Relay(c, rc)
-			if err != nil {
+			if err != nil && !isBenignRelayError(err) {
 				log.Printf("relay error: %v", err)
 			}
 		}()
@@ -119,7 +125,9 @@ func runServer(localAddr, targetAddr string) {
 			rc.SetKeepAlive(true)
 			_, _, err = relay.Relay(tunn, rc)
 			if err != nil {
-				log.Print(err)
+				if !isBenignRelayError(err) {
+					log.Print(err)
+				}
 				return
 			}
 		}()
