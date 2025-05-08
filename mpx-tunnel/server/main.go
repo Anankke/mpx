@@ -42,7 +42,9 @@ func main() {
 		}
 		go func() {
 			defer tunn.Close()
-			log.Printf("dial to %s", *targetAddr)
+			if *verbose {
+				log.Printf("dial to %s", *targetAddr)
+			}
 			rc, err := net.DialTCP("tcp", nil, target)
 			if err != nil || rc == nil {
 				log.Printf("failed to connect to target[%s]: %v", *targetAddr, err)
