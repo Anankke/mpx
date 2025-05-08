@@ -2,12 +2,11 @@ package main
 
 import (
 	"flag"
-	"io"
 	"log"
 	"net"
-	"time"
 
 	"github.com/Anankke/mpx"
+	"github.com/Anankke/mpx/mpx-tunnel/relay"
 )
 
 var (
@@ -50,39 +49,11 @@ func main() {
 				return
 			}
 			rc.SetKeepAlive(true)
-			_, _, err = relay(tunn, rc)
+			_, _, err = relay.Relay(tunn, rc)
 			if err != nil {
 				log.Print(err)
 				return
 			}
 		}()
 	}
-}
-
-func relay(left, right net.Conn) (int64, int64, error) {
-	type res struct {
-		N   int64
-		Err error
-	}
-	ch := make(chan res)
-
-	go func() {
-		var n int64
-		var err error
-		n, err = io.Copy(right, left)
-		right.SetDeadline(time.Now()) // wake up the other goroutine blocking on right
-		left.SetDeadline(time.Now())  // wake up the other goroutine blocking on left
-		ch <- res{n, err}
-	}()
-	var n int64
-	var err error
-	n, err = io.Copy(left, right)
-	right.SetDeadline(time.Now()) // wake up the other goroutine blocking on right
-	left.SetDeadline(time.Now())  // wake up the other goroutine blocking on left
-	rs := <-ch
-
-	if err == nil {
-		err = rs.Err
-	}
-	return n, rs.N, err
 }

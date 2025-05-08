@@ -2,15 +2,14 @@ package main
 
 import (
 	"flag"
-	"io"
 	"log"
 	"net"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Anankke/mpx"
 	"github.com/Anankke/mpx/dialer"
+	"github.com/Anankke/mpx/mpx-tunnel/relay"
 
 	"net/http"
 	_ "net/http/pprof"
@@ -76,35 +75,10 @@ func main() {
 			if err != nil {
 				log.Printf("failed to connect to target: %v", err)
 			}
-			_, _, err = relay(c, rc)
+			_, _, err = relay.Relay(c, rc)
 			if err != nil {
 				log.Printf("relay error: %v", err)
 			}
 		}()
 	}
-}
-
-func relay(left, right net.Conn) (int64, int64, error) {
-	type res struct {
-		N   int64
-		Err error
-	}
-	ch := make(chan res)
-
-	go func() {
-		n, err := io.Copy(right, left)
-		right.SetDeadline(time.Now()) // wake up the other goroutine blocking on right
-		left.SetDeadline(time.Now())  // wake up the other goroutine blocking on left
-		ch <- res{n, err}
-	}()
-
-	n, err := io.Copy(left, right)
-	right.SetDeadline(time.Now()) // wake up the other goroutine blocking on right
-	left.SetDeadline(time.Now())  // wake up the other goroutine blocking on left
-	rs := <-ch
-
-	if err == nil {
-		err = rs.Err
-	}
-	return n, rs.N, err
 }
