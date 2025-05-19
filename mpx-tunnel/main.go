@@ -8,6 +8,7 @@ import (
 	_ "net/http/pprof"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Anankke/mpx"
@@ -31,6 +32,57 @@ var (
 func isBenignRelayError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, "connection reset by peer")
+}
+
+// MultiServerPortCyclingDialer implements independent port cycling for each server.
+// It only increments the port when a connection attempt to that server's port fails.
+
+type serverPortCycler struct {
+	baseAddr   string
+	basePort   int
+	offset     int
+	cur        int
+	weight     uint32
+	lastTried  time.Time
+}
+
+type MultiServerPortCyclingDialer struct {
+	servers     []*serverPortCycler
+	failTimeout time.Duration
+	mu          sync.Mutex
+}
+
+func (d *MultiServerPortCyclingDialer) Dial() (net.Conn, uint32, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for {
+		soonest := time.Now().Add(d.failTimeout)
+		found := false
+		for _, s := range d.servers {
+			wait := s.lastTried.Add(d.failTimeout).Sub(time.Now())
+			if wait > 0 {
+				if s.lastTried.Add(d.failTimeout).Before(soonest) {
+					soonest = s.lastTried.Add(d.failTimeout)
+				}
+				continue
+			}
+			port := s.basePort + s.cur
+			addr := net.JoinHostPort(s.baseAddr, strconv.Itoa(port))
+			conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+			s.lastTried = time.Now()
+			if err == nil {
+				return conn, s.weight, nil
+			}
+			s.cur = (s.cur + 1) % s.offset
+			found = true
+		}
+		if !found {
+			// If all servers are cooling down, sleep until the next retry time.
+			d.mu.Unlock()
+			time.Sleep(time.Until(soonest))
+			d.mu.Lock()
+		}
+	}
 }
 
 func main() {
@@ -72,7 +124,8 @@ func runClient(localAddr, remoteAddr string, concurrentNum int) {
 	}
 
 	// Normalize and validate the address format for each remote server, ensuring host:port is correct.
-	for i, s := range remoteAddrs {
+	cyclers := make([]*serverPortCycler, 0, len(remoteAddrs))
+	for _, s := range remoteAddrs {
 		host, portStr, err := net.SplitHostPort(s.Addr)
 		if err != nil {
 			log.Fatalf("invalid server address: %s", s.Addr)
@@ -81,10 +134,20 @@ func runClient(localAddr, remoteAddr string, concurrentNum int) {
 		if err != nil {
 			log.Fatalf("invalid port: %s", portStr)
 		}
-		remoteAddrs[i].Addr = net.JoinHostPort(host, strconv.Itoa(port)) // Ensure address format is correct
+		if port+*offset-1 > 65535 {
+			log.Fatalf("port offset out of range: base %d + offset %d > 65535", port, *offset)
+		}
+		cyclers = append(cyclers, &serverPortCycler{
+			baseAddr:  host,
+			basePort:  port,
+			offset:    *offset,
+			cur:       0,
+			weight:    s.Weight,
+			lastTried: time.Time{},
+		})
 	}
 
-	d := dialer.NewTCPmultiDialer(remoteAddrs, *maxFails, *failTimeout)
+	d := &MultiServerPortCyclingDialer{servers: cyclers, failTimeout: *failTimeout}
 	cp := mpx.NewConnPool()
 	cp.StartWithDialer(d, concurrentNum)
 	lis, err := net.Listen("tcp", localAddr)
@@ -100,42 +163,14 @@ func runClient(localAddr, remoteAddr string, concurrentNum int) {
 		}
 		go func() {
 			defer c.Close()
-
-			// Port cycling logic: on each connection attempt, increment the port offset for each server to implement port failover.
-			var (
-				tryCount  int
-				baseAddrs = make([]string, len(remoteAddrs))
-				basePorts = make([]int, len(remoteAddrs))
-			)
-			for i, s := range remoteAddrs {
-				host, portStr, _ := net.SplitHostPort(s.Addr)
-				port, _ := strconv.Atoi(portStr)
-				baseAddrs[i] = host
-				basePorts[i] = port
+			rc, err := cp.Connect(nil)
+			if err != nil {
+				log.Printf("failed to connect to target: %v", err)
+				return
 			}
-			for {
-				// Generate the current set of remoteAddrs to try, applying port offset for each attempt
-				tryAddrs := make([]dialer.ServerWithWeight, len(remoteAddrs))
-				for i := range remoteAddrs {
-					offsetPort := basePorts[i] + (tryCount % *offset)
-					tryAddrs[i] = dialer.ServerWithWeight{
-						Addr:   net.JoinHostPort(baseAddrs[i], strconv.Itoa(offsetPort)),
-						Weight: remoteAddrs[i].Weight,
-					}
-				}
-				d := dialer.NewTCPmultiDialer(tryAddrs, *maxFails, *failTimeout)
-				cp.StartWithDialer(d, concurrentNum)
-				rc, err := cp.Connect(nil)
-				if err == nil {
-					_, _, relayErr := relay.Relay(c, rc)
-					if relayErr != nil && !isBenignRelayError(relayErr) {
-						log.Printf("relay error: %v", relayErr)
-					}
-					return
-				}
-				log.Printf("failed to connect to target: %v, try next port", err)
-				tryCount++
-				time.Sleep(time.Second)
+			_, _, err = relay.Relay(c, rc)
+			if err != nil && !isBenignRelayError(err) {
+				log.Printf("relay error: %v", err)
 			}
 		}()
 	}
