@@ -13,6 +13,7 @@ import (
 	"github.com/Anankke/mpx"
 	"github.com/Anankke/mpx/dialer"
 	"github.com/Anankke/mpx/mpx-tunnel/relay"
+	"github.com/Anankke/mpx/debug"
 )
 
 var (
@@ -164,7 +165,7 @@ func runServer(localAddr, targetAddr string) {
 		}
 		go func() {
 			defer tunn.Close()
-			log.Printf("dial to %s", targetAddr)
+			debug.Printf("dial to %s", targetAddr)
 			rc, err := net.DialTCP("tcp", nil, target)
 			if err != nil || rc == nil {
 				log.Printf("failed to connect to target[%s]: %v", targetAddr, err)
