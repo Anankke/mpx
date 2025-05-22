@@ -138,7 +138,7 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 		return nil, 0, err
 	}
 
-	portOffset := atomic.LoadUint32(&serverRef.PortOffset)
+	portOffset := serverRef.PortOffset.Load()
 	nextPort := port + int(portOffset)
 	tcpAddr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(host, strconv.Itoa(nextPort)))
 	if err != nil {
@@ -151,7 +151,7 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 			d.failedAt[addr] = now
 		}
 
-		atomic.CompareAndSwapUint32(&serverRef.PortOffset, portOffset, (portOffset+1)%uint32(d.maxOffset))
+		serverRef.PortOffset.CompareAndSwap(portOffset, (portOffset+1)%uint32(d.maxOffset))
 		return nil, 0, err
 	}
 	d.failCount[addr] = 0
