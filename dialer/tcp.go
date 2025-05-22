@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,18 +21,20 @@ func (d *TCPDialer) Dial() (net.Conn, uint32, error) {
 }
 
 type ServerWithWeight struct {
-	Addr   string
-	Weight uint32
+	Addr       string
+	PortOffset atomic.Uint32
+	Weight     uint32
 }
 
 type TCPmultiDialer struct {
-	RemoteAddrs []ServerWithWeight
+	RemoteAddrs []*ServerWithWeight
 	dialLock    sync.Mutex
 	connList    *list.List
 	failCount   map[string]int
 	failedAt    map[string]time.Time
 	maxFails    int
 	failTimeout time.Duration
+	maxOffset   int
 }
 
 type TCPmultiConn struct {
@@ -45,7 +49,7 @@ func (c *TCPmultiConn) Close() error {
 	return c.Conn.Close()
 }
 
-func NewTCPmultiDialer(remoteAddrs []ServerWithWeight, maxFails int, failTimeout time.Duration) *TCPmultiDialer {
+func NewTCPmultiDialer(remoteAddrs []*ServerWithWeight, maxFails int, maxOffset int, failTimeout time.Duration) *TCPmultiDialer {
 	return &TCPmultiDialer{
 		RemoteAddrs: remoteAddrs,
 		connList:    list.New(),
@@ -53,6 +57,7 @@ func NewTCPmultiDialer(remoteAddrs []ServerWithWeight, maxFails int, failTimeout
 		failedAt:    make(map[string]time.Time),
 		maxFails:    maxFails,
 		failTimeout: failTimeout,
+		maxOffset:   maxOffset,
 	}
 }
 
@@ -64,15 +69,14 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 	defer d.dialLock.Unlock()
 
 	now := time.Now()
-	eligible := make([]ServerWithWeight, 0, len(d.RemoteAddrs))
+	eligible := make([]*ServerWithWeight, 0, len(d.RemoteAddrs))
 	for _, ra := range d.RemoteAddrs {
 		if count := d.failCount[ra.Addr]; count >= d.maxFails {
 			if t, ok := d.failedAt[ra.Addr]; ok {
 				elapsed := now.Sub(t)
 				if elapsed < d.failTimeout {
-					continue // still in failure state
+					continue
 				}
-				// reset after timeout
 				log.Printf("Dialer: server %s recovered after %s, resetting failure state", ra.Addr, elapsed)
 				d.failCount[ra.Addr] = 0
 				delete(d.failedAt, ra.Addr)
@@ -108,19 +112,35 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 
 	var addr string
 	var weight uint32
+	var serverRef *ServerWithWeight
 	if d.connList.Len() == 0 {
-		addr = eligible[0].Addr
-		weight = eligible[0].Weight
+		serverRef = eligible[0]
+		addr = serverRef.Addr
+		weight = serverRef.Weight
 	} else {
 		for _, ra := range eligible {
 			if float32(weightMap[ra.Addr])/float32(totalActualWeight) <= float32(ra.Weight)/float32(totalWeight) {
+				serverRef = ra
 				addr = ra.Addr
 				weight = ra.Weight
 				break
 			}
 		}
 	}
-	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+
+	host, rawPort, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	port, err := strconv.Atoi(rawPort)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	portOffset := atomic.LoadUint32(&serverRef.PortOffset)
+	nextPort := port + int(portOffset)
+	tcpAddr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(host, strconv.Itoa(nextPort)))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -130,6 +150,8 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 		if d.failCount[addr] >= d.maxFails {
 			d.failedAt[addr] = now
 		}
+
+		atomic.CompareAndSwapUint32(&serverRef.PortOffset, portOffset, (portOffset+1)%uint32(d.maxOffset))
 		return nil, 0, err
 	}
 	d.failCount[addr] = 0

@@ -8,7 +8,6 @@ import (
 	_ "net/http/pprof"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Anankke/mpx"
@@ -34,57 +33,6 @@ func isBenignRelayError(err error) bool {
 	return strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, "connection reset by peer")
 }
 
-// MultiServerPortCyclingDialer implements independent port cycling for each server.
-// It only increments the port when a connection attempt to that server's port fails.
-
-type serverPortCycler struct {
-	baseAddr   string
-	basePort   int
-	offset     int
-	cur        int
-	weight     uint32
-	lastTried  time.Time
-}
-
-type MultiServerPortCyclingDialer struct {
-	servers     []*serverPortCycler
-	failTimeout time.Duration
-	mu          sync.Mutex
-}
-
-func (d *MultiServerPortCyclingDialer) Dial() (net.Conn, uint32, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for {
-		soonest := time.Now().Add(d.failTimeout)
-		found := false
-		for _, s := range d.servers {
-			wait := s.lastTried.Add(d.failTimeout).Sub(time.Now())
-			if wait > 0 {
-				if s.lastTried.Add(d.failTimeout).Before(soonest) {
-					soonest = s.lastTried.Add(d.failTimeout)
-				}
-				continue
-			}
-			port := s.basePort + s.cur
-			addr := net.JoinHostPort(s.baseAddr, strconv.Itoa(port))
-			conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-			s.lastTried = time.Now()
-			if err == nil {
-				return conn, s.weight, nil
-			}
-			s.cur = (s.cur + 1) % s.offset
-			found = true
-		}
-		if !found {
-			// If all servers are cooling down, sleep until the next retry time.
-			d.mu.Unlock()
-			time.Sleep(time.Until(soonest))
-			d.mu.Lock()
-		}
-	}
-}
-
 func main() {
 	flag.Parse()
 	if *enablePprof {
@@ -106,7 +54,7 @@ func main() {
 
 func runClient(localAddr, remoteAddr string, concurrentNum int) {
 	servers := strings.Split(remoteAddr, ",")
-	remoteAddrs := make([]dialer.ServerWithWeight, 0, len(servers))
+	remoteAddrs := make([]*dialer.ServerWithWeight, 0, len(servers))
 	for _, server := range servers {
 		re := strings.Split(server, "|")
 		if len(re) == 2 {
@@ -116,40 +64,22 @@ func runClient(localAddr, remoteAddr string, concurrentNum int) {
 				log.Fatal(err)
 			}
 			log.Printf("add server %s with weight %d", addr, weight)
-			remoteAddrs = append(remoteAddrs, dialer.ServerWithWeight{
+			remoteAddrs = append(remoteAddrs, &dialer.ServerWithWeight{
 				Addr:   addr,
 				Weight: uint32(weight),
 			})
 		}
 	}
 
-	// Normalize and validate the address format for each remote server, ensuring host:port is correct.
-	cyclers := make([]*serverPortCycler, 0, len(remoteAddrs))
-	for _, s := range remoteAddrs {
-		host, portStr, err := net.SplitHostPort(s.Addr)
-		if err != nil {
-			log.Fatalf("invalid server address: %s", s.Addr)
-		}
-		port, err := strconv.Atoi(portStr)
-		if err != nil {
-			log.Fatalf("invalid port: %s", portStr)
-		}
-		if port+*offset-1 > 65535 {
-			log.Fatalf("port offset out of range: base %d + offset %d > 65535", port, *offset)
-		}
-		cyclers = append(cyclers, &serverPortCycler{
-			baseAddr:  host,
-			basePort:  port,
-			offset:    *offset,
-			cur:       0,
-			weight:    s.Weight,
-			lastTried: time.Time{},
-		})
+	if len(remoteAddrs) == 0 {
+		log.Fatal("no server specified")
 	}
 
-	d := &MultiServerPortCyclingDialer{servers: cyclers, failTimeout: *failTimeout}
+	d := dialer.NewTCPmultiDialer(remoteAddrs, *maxFails, *offset, *failTimeout)
 	cp := mpx.NewConnPool()
-	cp.StartWithDialer(d, concurrentNum)
+	if err := cp.StartWithDialer(d, concurrentNum); err != nil {
+		log.Fatalf("StartWithDialer failed: %v", err)
+	}
 	lis, err := net.Listen("tcp", localAddr)
 	if err != nil {
 		log.Fatal(err)
